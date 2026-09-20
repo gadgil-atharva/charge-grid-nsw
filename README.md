@@ -2,31 +2,30 @@
 
 A data engineering pipeline that integrates Transport for NSW EV charger data with ABS regional spatial boundaries. It augments DC fast chargers via external APIs and stores the final spatial dataset in a DuckDB relational database for coverage analysis.
 
----
+## Git Workflow Guidelines
 
-## Team Git Guidelines
+### Branch Policy
 
-To maintain code quality and collaboration, please follow this workflow for all contributions.
+Never push directly to the `main` branch. The main branch must remain clean and functional at all times.
 
-### ✋ Branch Policy
-
-**Never push directly to `main`** — keep the main branch clean and working at all times.
-
-Always work on feature branches for your assigned tasks:
+Create a feature branch for your assigned work before writing code:
 
 ```bash
 git checkout -b feature/<role-or-task-name>
 ```
 
-**Examples:**
-- `feature/data-cleaning`
-- `feature/api-augmentation`
-- `feature/spatial-join`
-- `feature/duckdb-schema`
+Common branch naming examples:
 
-### 🔄 Before Starting New Work
+```
+feature/data-cleaning
+feature/api-augmentation
+feature/spatial-join
+feature/duckdb-schema
+```
 
-Sync your feature branch with the latest changes from main:
+### Synchronizing Your Branch
+
+Before starting new work, sync your branch with the latest changes from main:
 
 ```bash
 git checkout main
@@ -35,19 +34,33 @@ git checkout feature/<your-branch>
 git merge main
 ```
 
-### 💬 Commit Guidelines
+### Commit Standards
 
-- **Commit frequently** with small, logical changes
-- **Use descriptive messages** that clearly explain what changed
-- **Example:** `git commit -m "Add coordinate matching logic for OCM API"`
+- Commit frequently with small, logical changes
+- Use clear, descriptive commit messages
+- Example: `git commit -m "Add coordinate matching logic for OCM API"`
 
-### 🚫 Things to Avoid
+### Restrictions
 
-- **Never force push** (`git push -f`) on shared branches
-- **Never commit** CSV files, shapefiles, or `.duckdb` files (check `.gitignore`)
+Do not use force push on shared branches:
 
-### ✅ Before Opening a Pull Request
+```bash
+git push -f  # Do not use
+```
 
-1. Test your script locally to ensure it runs without breaking existing files
-2. Verify `git status` shows no tracked data files
-3. Only open a PR when your changes are ready for review
+Do not commit the following file types:
+
+- CSV files
+- Shapefiles
+- DuckDB database files (`.duckdb`)
+
+Verify these files are listed in `.gitignore` before committing.
+
+### Pull Request Checklist
+
+Before opening a pull request:
+
+1. Test your code locally to confirm it runs without errors
+2. Verify no data files are staged using `git status`
+3. Ensure existing files and workflows are not broken by your changes
+4. Submit the pull request when ready for review
