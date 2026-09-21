@@ -208,3 +208,10 @@ __marimo__/
 *.duckdb.tmp/
 *.db
 *.wal
+
+# ======================================================================
+# NSW EV PIPELINE - LOCAL DATA
+# ======================================================================
+
+# All downloaded and processed data stays local
+data/
