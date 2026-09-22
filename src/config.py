@@ -16,12 +16,18 @@ PROCESSED_DIR = DATA_DIR / "processed"
 SA4_DIR = RAW_DIR / "abs_sa4"                              
 
 EV_RAW_CSV = RAW_DIR / "tfnsw_ev_dec2025.csv"
-EV_CLEAN_CSV = PROCESSED_DIR / "tfnsw_ev_cleaned.csv"
-# output of the augmentation stage (OpenChargeMap / OSM enrichment of DC
-# chargers). Filename is provisional until that stage settles on one -
-# update this if it lands under a different name.
-EV_ENRICHED_CSV = PROCESSED_DIR / "tfnsw_ev_augmented.csv"
-EV_SA4_CSV = PROCESSED_DIR / "tfnsw_ev_with_sa4.csv"       # chargers (+ enrichment if present) + their SA4
+EV_CLEAN_CSV = PROCESSED_DIR / "tfnsw_ev_cleaned.csv"      # AC + DC, from data_acquisition.py
+
+# Atharva's augmentation stage output: DC chargers only, enriched via
+# OpenChargeMap. He has not settled on one exact filename yet, so this
+# searches a few plausible variants rather than pinning one.
+DC_AUGMENTED_NAME_PATTERNS = ["dc_charger*augment*.csv", "dc_charger*.csv"]
+
+# spatial stage outputs - kept as two separate files per charger type,
+# not one combined file: DC (augmented) and AC are different audiences
+# downstream (schema/load stage loads them into different tables).
+AC_SA4_CSV = PROCESSED_DIR / "ac_chargers_with_sa4.csv"
+DC_SA4_CSV = PROCESSED_DIR / "dc_chargers_augmented_with_sa4.csv"
 
 # database (gitignored; rebuilt by the pipeline)
 DUCKDB_PATH = DATA_DIR / "ev_nsw.duckdb"
@@ -57,3 +63,14 @@ def find_sa4_shapefile() -> Path:
     if shp is None:
         raise FileNotFoundError(f"No SA4 shapefile in {SA4_DIR} - run: python -m src.data_acquisition")
     return shp
+
+
+def find_dc_augmented_csv() -> Path | None:
+    """Path to Atharva's augmented DC-charger CSV, if it has been dropped into
+    data/processed/ yet. Returns None (not an error) when it hasn't - the
+    spatial stage can still run its AC join without it."""
+    for pattern in DC_AUGMENTED_NAME_PATTERNS:
+        hit = next(iter(sorted(PROCESSED_DIR.glob(pattern))), None)
+        if hit is not None:
+            return hit
+    return None

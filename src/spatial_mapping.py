@@ -1,29 +1,31 @@
 """
 spatial_mapping.py - assign every EV charger to its ASGS SA4 region.
 
-Pipeline order: data_acquisition.py (acquire + clean) -> augmentation
-notebook (OpenChargeMap / OSM enrichment of DC chargers) -> this stage ->
-database_load.py (schema + load).
+Pipeline order: data_acquisition.py (acquire + clean, AC + DC together) ->
+augmentation notebook (Atharva - filters DC chargers, enriches via
+OpenChargeMap) -> this stage -> database_load.py (schema + load).
 
-  1. Load the ASGS SA4 boundaries with DuckDB's spatial extension (ST_Read)
-  2. Build point geometry from the charger latitude/longitude
-  3. Join points to polygons, then persist to DuckDB for spatial querying
+Produces TWO separate outputs, not one combined file, because they have
+different upstream sources and different downstream consumers:
 
-  input   data/processed/tfnsw_ev_augmented.csv  (preferred - augmentation
-                                                   stage output, if present)
-          data/processed/tfnsw_ev_cleaned.csv    (fallback - straight from
-                                                   data_acquisition.py, used
-                                                   while augmentation is
-                                                   still in progress)
-  output  data/processed/tfnsw_ev_with_sa4.csv  (input columns + sa4_code/name)
-          data/ev_nsw.duckdb                    (sa4_region, charger_location,
-                                                 charger_sa4_assignment)
+  DC (augmented)  input   data/processed/dc_charger*augment*.csv
+                          (Atharva's enriched DC-only output)
+                  output  data/processed/dc_chargers_augmented_with_sa4.csv
 
-Either input works unchanged: the join only needs charger_id, latitude and
-longitude, and every other column is passed through as-is, so whatever
-attributes the augmentation stage adds ride along automatically.
+  AC              input   data/processed/tfnsw_ev_cleaned.csv, filtered to
+                          current_type = 'AC' (from data_acquisition.py)
+                  output  data/processed/ac_chargers_with_sa4.csv
 
-Run after data_acquisition.py (and the augmentation stage, once it lands):
+  both also feed   data/ev_nsw.duckdb (sa4_region, charger_location,
+                    charger_sa4_assignment - reset and reused per subset)
+
+Every column of whichever input CSV is given rides through unchanged to its
+output alongside sa4_code/sa4_name, so this file never needs to know what
+attributes Atharva's augmentation added.
+
+Run after data_acquisition.py. The DC join runs only once Atharva's
+augmented CSV is present in data/processed/ - until then this stage still
+produces the AC output and logs a clear skip message for DC.
 
     python -m src.spatial_mapping
 """
@@ -60,6 +62,18 @@ def connect(db_path=None) -> duckdb.DuckDBPyConnection:
 
 def apply_ddl(con) -> None:
     con.execute(cfg.SPATIAL_DDL.read_text(encoding="utf-8"))
+
+
+def reset_charger_tables(con) -> None:
+    """Clear the per-charger tables between subsets, keeping sa4_region as-is.
+
+    AC and DC are run as two independent passes through the same schema, so
+    each pass starts from an empty charger_location/charger_sa4_assignment -
+    there is no need (or benefit) to reload or re-verify the SA4 boundaries
+    each time.
+    """
+    con.execute("DELETE FROM charger_sa4_assignment")
+    con.execute("DELETE FROM charger_location")
 
 
 # BOUNDARIES
@@ -102,9 +116,26 @@ def load_sa4(con, shp) -> None:
     log.info("SA4 regions: %d with geometry, %d special-purpose (excluded)", kept, special)
 
 
+def build_index(con) -> None:
+    """R-tree on the SA4 geometry.
+
+    At this data volume the join is already sub-second, so this earns nothing
+    now; it is here for the repeated range and nearest-neighbour queries
+    planned for the next stage of the project.
+    """
+    try:
+        con.execute("CREATE INDEX IF NOT EXISTS idx_sa4_geom ON sa4_region USING RTREE (geom)")
+    except duckdb.Error as exc:
+        log.warning("R-tree index not created: %s", exc)
+
+
 # CHARGER POINTS
-def load_points(con, csv_path) -> None:
-    """Build point geometry from the cleaned coordinates.
+def load_points(con, csv_path, where_sql: str = "TRUE") -> None:
+    """Build point geometry from the given CSV's coordinates.
+
+    `where_sql` filters which rows of csv_path are loaded (e.g. restricting
+    the cleaned AC+DC file down to AC only). It is caller-controlled, never
+    user input, so it is inlined rather than parameterised.
 
     ST_Point takes (x, y) = (longitude, latitude), which is the reverse of the
     column order in the source. Passing them the wrong way round puts every NSW
@@ -117,7 +148,10 @@ def load_points(con, csv_path) -> None:
     con.execute(
         f"""
         INSERT INTO charger_location
-        WITH flagged AS (
+        WITH source AS (
+            SELECT * FROM read_csv_auto(?, header = true)
+        ),
+        flagged AS (
             SELECT charger_id,
                    CAST(latitude AS DOUBLE)  AS lat,
                    CAST(longitude AS DOUBLE) AS lon,
@@ -128,7 +162,8 @@ def load_points(con, csv_path) -> None:
                          OR CAST(latitude AS DOUBLE)  NOT BETWEEN {cfg.NSW_BBOX['lat'][0]} AND {cfg.NSW_BBOX['lat'][1]}
                                                                   THEN 'outside_nsw_bbox'
                    END AS reject
-            FROM read_csv_auto(?, header = true)
+            FROM source
+            WHERE {where_sql}
         )
         SELECT charger_id, lat, lon, reject IS NULL, reject,
                CASE WHEN reject IS NULL THEN ST_Point(lon, lat) END
@@ -136,9 +171,9 @@ def load_points(con, csv_path) -> None:
         """,
         [str(csv_path)],
     )
+    total = con.execute("SELECT count(*) FROM charger_location").fetchone()[0]
     bad = con.execute("SELECT count(*) FROM charger_location WHERE NOT coord_valid").fetchone()[0]
-    if bad:
-        log.warning("%d charger(s) failed the coordinate screen and will not be joined", bad)
+    log.info("%d charger(s) loaded, %d failed the coordinate screen", total, bad)
 
 
 # THE JOIN
@@ -210,22 +245,9 @@ def run_join(con, tolerance_m: float) -> None:
     )
 
 
-def build_index(con) -> None:
-    """R-tree on the SA4 geometry.
-
-    At 1,958 points against 89 polygons the join is already sub-second, so this
-    earns nothing now; it is here for the repeated range and nearest-neighbour
-    queries planned for Assignment 2.
-    """
-    try:
-        con.execute("CREATE INDEX IF NOT EXISTS idx_sa4_geom ON sa4_region USING RTREE (geom)")
-    except duckdb.Error as exc:
-        log.warning("R-tree index not created: %s", exc)
-
-
 # OUTPUT
-def export_csv(con, csv_in, csv_out) -> None:
-    """Write the cleaned chargers back out with their SA4 columns attached."""
+def export_csv(con, csv_in, csv_out, where_sql: str = "TRUE") -> None:
+    """Write the given subset of csv_in back out with its SA4 columns attached."""
     csv_out.parent.mkdir(parents=True, exist_ok=True)
     # COPY ... TO does not accept a bound parameter for the target path, so it
     # is escaped and inlined; the input path stays parameterised.
@@ -237,6 +259,7 @@ def export_csv(con, csv_in, csv_out) -> None:
             FROM read_csv_auto(?, header = true) e
             LEFT JOIN charger_sa4_assignment a USING (charger_id)
             LEFT JOIN sa4_region s USING (sa4_code)
+            WHERE {where_sql}
             ORDER BY e.charger_id
         ) TO '{target}' (HEADER, DELIMITER ',')
         """,
@@ -245,57 +268,38 @@ def export_csv(con, csv_in, csv_out) -> None:
     log.info("wrote %s", csv_out)
 
 
-def report(con) -> dict:
-    """Coverage and sanity checks - these are the numbers quoted in the report."""
+def report(con, label: str) -> dict:
+    """Coverage and sanity checks for whichever subset was just joined."""
     total, assigned = con.execute(
         "SELECT count(*), count(sa4_code) FROM charger_sa4_assignment"
     ).fetchone()
-    log.info("assigned %d of %d chargers (%.1f%%)", assigned, total, 100.0 * assigned / total)
+    pct = 100.0 * assigned / total if total else 0.0
+    log.info("[%s] assigned %d of %d chargers (%.1f%%)", label, assigned, total, pct)
     for method, n in con.execute(
         "SELECT match_method, count(*) FROM charger_sa4_assignment GROUP BY 1 ORDER BY 2 DESC"
     ).fetchall():
         log.info("  %-18s %d", method, n)
-    for state, n in con.execute(
-        "SELECT s.state_name, count(*) FROM charger_sa4_assignment a "
-        "JOIN sa4_region s USING (sa4_code) GROUP BY 1 ORDER BY 2 DESC"
-    ).fetchall():
-        log.info("  state: %-22s %d", state, n)
     for cid, name, d in con.execute(
         "SELECT a.charger_id, s.sa4_name, round(a.match_distance_m, 2) FROM charger_sa4_assignment a "
         "JOIN sa4_region s USING (sa4_code) WHERE a.match_method = 'nearest_boundary'"
     ).fetchall():
         log.info("  snapped charger %s -> %s (%.2f m)", cid, name, d)
-    return {"total": total, "assigned": assigned}
+    return {"label": label, "total": total, "assigned": assigned}
 
 
-def resolve_input_csv():
-    """Prefer the augmented charger CSV; fall back to the cleaned one.
-
-    The augmentation stage (OpenChargeMap / OSM enrichment of DC chargers)
-    runs before this one in the agreed pipeline order, but its output may not
-    exist yet while that work is in progress. Falling back keeps this stage
-    runnable end-to-end in the meantime; re-run it once the enriched CSV lands
-    and every attribute it added rides through to the output unchanged.
-    """
-    if cfg.EV_ENRICHED_CSV.exists():
-        log.info("using augmented charger data: %s", cfg.EV_ENRICHED_CSV)
-        return cfg.EV_ENRICHED_CSV
-    if cfg.EV_CLEAN_CSV.exists():
-        log.warning(
-            "%s not found - falling back to cleaned (non-augmented) data at %s. "
-            "Re-run this stage once the augmentation output is available.",
-            cfg.EV_ENRICHED_CSV, cfg.EV_CLEAN_CSV,
-        )
-        return cfg.EV_CLEAN_CSV
-    raise FileNotFoundError(
-        f"Neither {cfg.EV_ENRICHED_CSV} nor {cfg.EV_CLEAN_CSV} found - "
-        "run: python -m src.data_acquisition"
-    )
+def run_subset(con, csv_path, output_csv, tolerance_m: float, where_sql: str, label: str) -> dict:
+    """One full join pass for one charger subset: reset, load, join, export, report."""
+    reset_charger_tables(con)
+    load_points(con, csv_path, where_sql)
+    run_join(con, tolerance_m)
+    export_csv(con, csv_path, output_csv, where_sql)
+    return report(con, label)
 
 
 # ENTRY POINT
 def run(tolerance_m: float = NEAREST_TOLERANCE_M, db_path=None) -> dict:
-    ev_csv = resolve_input_csv()
+    if not cfg.EV_CLEAN_CSV.exists():
+        raise FileNotFoundError(f"{cfg.EV_CLEAN_CSV} missing - run: python -m src.data_acquisition")
     shp = cfg.find_sa4_shapefile()
 
     con = connect(db_path)
@@ -303,21 +307,40 @@ def run(tolerance_m: float = NEAREST_TOLERANCE_M, db_path=None) -> dict:
         apply_ddl(con)
         log.info("SA4 source CRS verified: %s", verify_crs(con, shp))
         load_sa4(con, shp)
-        load_points(con, ev_csv)
-        run_join(con, tolerance_m)
         build_index(con)
-        export_csv(con, ev_csv, cfg.EV_SA4_CSV)
-        stats = report(con)
+
+        results = {}
+
+        results["ac"] = run_subset(
+            con, cfg.EV_CLEAN_CSV, cfg.AC_SA4_CSV, tolerance_m,
+            where_sql="current_type = 'AC'", label="AC",
+        )
+
+        dc_csv = cfg.find_dc_augmented_csv()
+        if dc_csv is not None:
+            log.info("using augmented DC charger data: %s", dc_csv)
+            results["dc"] = run_subset(
+                con, dc_csv, cfg.DC_SA4_CSV, tolerance_m,
+                where_sql="TRUE", label="DC (augmented)",
+            )
+        else:
+            log.warning(
+                "no augmented DC charger CSV found in %s (looked for: %s). "
+                "Drop Atharva's output there and re-run to produce %s.",
+                cfg.PROCESSED_DIR, ", ".join(cfg.DC_AUGMENTED_NAME_PATTERNS), cfg.DC_SA4_CSV,
+            )
+            results["dc"] = None
+
         con.execute("CHECKPOINT")
     finally:
         con.close()
-    return stats
+    return results
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | %(message)s",
                         datefmt="%H:%M:%S")
-    ap = argparse.ArgumentParser(description="Join EV chargers to ASGS SA4 regions.")
+    ap = argparse.ArgumentParser(description="Join EV chargers (AC and augmented DC) to ASGS SA4 regions.")
     ap.add_argument("--tolerance", type=float, default=NEAREST_TOLERANCE_M,
                     help="nearest-boundary snap tolerance in metres")
     args = ap.parse_args()
