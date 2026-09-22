@@ -1,26 +1,66 @@
 # charge-grid-nsw
+
 A data engineering pipeline that integrates Transport for NSW EV charger data with ABS regional spatial boundaries. It augments DC fast chargers via external APIs and stores the final spatial dataset in a DuckDB relational database for coverage analysis.
-Team Git Guidelines
-Add this to your README.md or pin it in your group chat so everyone follows the same workflow:
 
-Never push directly to main: Keep the main branch clean and working at all times.
+## Git Workflow Guidelines
 
-Work on feature branches: Create a branch for your assigned role before writing code:
+### Branch Policy
 
-Bash
+Never push directly to the `main` branch. The main branch must remain clean and functional at all times.
+
+Create a feature branch for your assigned work before writing code:
+
+```bash
 git checkout -b feature/<role-or-task-name>
-# Examples: feature/data-cleaning, feature/api-augmentation, feature/spatial-join, feature/duckdb-schema
-Sync before you start: Always pull the latest changes from main before starting new work:
+```
 
-Bash
+Common branch naming examples:
+
+```
+feature/data-cleaning
+feature/api-augmentation
+feature/spatial-join
+feature/duckdb-schema
+```
+
+### Synchronizing Your Branch
+
+Before starting new work, sync your branch with the latest changes from main:
+
+```bash
 git checkout main
 git pull origin main
 git checkout feature/<your-branch>
 git merge main
-Small, descriptive commits: Commit frequently with clear messages (e.g., git commit -m "Add coordinate matching logic for OCM API").
+```
 
-Never force push: Avoid git push -f on shared branches.
+### Commit Standards
 
-Test before opening a PR: Make sure your script runs locally without breaking existing files before opening a Pull Request into main.
+- Commit frequently with small, logical changes
+- Use clear, descriptive commit messages
+- Example: `git commit -m "Add coordinate matching logic for OCM API"`
 
-Respect the .gitignore: Double-check git status before committing to ensure no .csv, shapefiles, or .duckdb files are staged.
+### Restrictions
+
+Do not use force push on shared branches:
+
+```bash
+git push -f  # Do not use
+```
+
+Do not commit the following file types:
+
+- CSV files
+- Shapefiles
+- DuckDB database files (`.duckdb`)
+
+Verify these files are listed in `.gitignore` before committing.
+
+### Pull Request Checklist
+
+Before opening a pull request:
+
+1. Test your code locally to confirm it runs without errors
+2. Verify no data files are staged using `git status`
+3. Ensure existing files and workflows are not broken by your changes
+4. Submit the pull request when ready for review
