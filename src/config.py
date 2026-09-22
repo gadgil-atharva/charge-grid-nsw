@@ -17,6 +17,11 @@ SA4_DIR = RAW_DIR / "abs_sa4"
 
 EV_RAW_CSV = RAW_DIR / "tfnsw_ev_dec2025.csv"              
 EV_CLEAN_CSV = PROCESSED_DIR / "tfnsw_ev_cleaned.csv"
+EV_SA4_CSV = PROCESSED_DIR / "tfnsw_ev_with_sa4.csv"       # cleaned chargers + their SA4
+
+# database (gitignored; rebuilt by the pipeline)
+DUCKDB_PATH = DATA_DIR / "ev_nsw.duckdb"
+SPATIAL_DDL = ROOT / "sql" / "spatial_schema.sql"
 
 # source data
 EV_TARGET_MONTH = "202512"                                 
@@ -38,6 +43,8 @@ SA4_URL = (
 )
 SA4_CRS = "EPSG:7844"                                      
 NSW_STATE_CODE = "1"                                       
+# generous NSW extent, used only to catch grossly wrong coordinates
+NSW_BBOX = {"lat": (-38.0, -27.5), "lon": (140.5, 154.2)}  
 
 
 def find_sa4_shapefile() -> Path:
