@@ -1,16 +1,29 @@
 """
-spatial_mapping.py - assign every cleaned EV charger to its ASGS SA4 region.
+spatial_mapping.py - assign every EV charger to its ASGS SA4 region.
+
+Pipeline order: data_acquisition.py (acquire + clean) -> augmentation
+notebook (OpenChargeMap / OSM enrichment of DC chargers) -> this stage ->
+database_load.py (schema + load).
 
   1. Load the ASGS SA4 boundaries with DuckDB's spatial extension (ST_Read)
-  2. Build point geometry from the cleaned latitude/longitude
+  2. Build point geometry from the charger latitude/longitude
   3. Join points to polygons, then persist to DuckDB for spatial querying
 
-  input   data/processed/tfnsw_ev_cleaned.csv   (from data_acquisition.py)
-  output  data/processed/tfnsw_ev_with_sa4.csv  (chargers + sa4_code/sa4_name)
+  input   data/processed/tfnsw_ev_augmented.csv  (preferred - augmentation
+                                                   stage output, if present)
+          data/processed/tfnsw_ev_cleaned.csv    (fallback - straight from
+                                                   data_acquisition.py, used
+                                                   while augmentation is
+                                                   still in progress)
+  output  data/processed/tfnsw_ev_with_sa4.csv  (input columns + sa4_code/name)
           data/ev_nsw.duckdb                    (sa4_region, charger_location,
                                                  charger_sa4_assignment)
 
-Run after data_acquisition.py:
+Either input works unchanged: the join only needs charger_id, latitude and
+longitude, and every other column is passed through as-is, so whatever
+attributes the augmentation stage adds ride along automatically.
+
+Run after data_acquisition.py (and the augmentation stage, once it lands):
 
     python -m src.spatial_mapping
 """
@@ -255,10 +268,34 @@ def report(con) -> dict:
     return {"total": total, "assigned": assigned}
 
 
+def resolve_input_csv():
+    """Prefer the augmented charger CSV; fall back to the cleaned one.
+
+    The augmentation stage (OpenChargeMap / OSM enrichment of DC chargers)
+    runs before this one in the agreed pipeline order, but its output may not
+    exist yet while that work is in progress. Falling back keeps this stage
+    runnable end-to-end in the meantime; re-run it once the enriched CSV lands
+    and every attribute it added rides through to the output unchanged.
+    """
+    if cfg.EV_ENRICHED_CSV.exists():
+        log.info("using augmented charger data: %s", cfg.EV_ENRICHED_CSV)
+        return cfg.EV_ENRICHED_CSV
+    if cfg.EV_CLEAN_CSV.exists():
+        log.warning(
+            "%s not found - falling back to cleaned (non-augmented) data at %s. "
+            "Re-run this stage once the augmentation output is available.",
+            cfg.EV_ENRICHED_CSV, cfg.EV_CLEAN_CSV,
+        )
+        return cfg.EV_CLEAN_CSV
+    raise FileNotFoundError(
+        f"Neither {cfg.EV_ENRICHED_CSV} nor {cfg.EV_CLEAN_CSV} found - "
+        "run: python -m src.data_acquisition"
+    )
+
+
 # ENTRY POINT
 def run(tolerance_m: float = NEAREST_TOLERANCE_M, db_path=None) -> dict:
-    if not cfg.EV_CLEAN_CSV.exists():
-        raise FileNotFoundError(f"{cfg.EV_CLEAN_CSV} missing - run: python -m src.data_acquisition")
+    ev_csv = resolve_input_csv()
     shp = cfg.find_sa4_shapefile()
 
     con = connect(db_path)
@@ -266,10 +303,10 @@ def run(tolerance_m: float = NEAREST_TOLERANCE_M, db_path=None) -> dict:
         apply_ddl(con)
         log.info("SA4 source CRS verified: %s", verify_crs(con, shp))
         load_sa4(con, shp)
-        load_points(con, cfg.EV_CLEAN_CSV)
+        load_points(con, ev_csv)
         run_join(con, tolerance_m)
         build_index(con)
-        export_csv(con, cfg.EV_CLEAN_CSV, cfg.EV_SA4_CSV)
+        export_csv(con, ev_csv, cfg.EV_SA4_CSV)
         stats = report(con)
         con.execute("CHECKPOINT")
     finally:

@@ -15,9 +15,13 @@ RAW_DIR = DATA_DIR / "raw"
 PROCESSED_DIR = DATA_DIR / "processed"
 SA4_DIR = RAW_DIR / "abs_sa4"                              
 
-EV_RAW_CSV = RAW_DIR / "tfnsw_ev_dec2025.csv"              
+EV_RAW_CSV = RAW_DIR / "tfnsw_ev_dec2025.csv"
 EV_CLEAN_CSV = PROCESSED_DIR / "tfnsw_ev_cleaned.csv"
-EV_SA4_CSV = PROCESSED_DIR / "tfnsw_ev_with_sa4.csv"       # cleaned chargers + their SA4
+# output of the augmentation stage (OpenChargeMap / OSM enrichment of DC
+# chargers). Filename is provisional until that stage settles on one -
+# update this if it lands under a different name.
+EV_ENRICHED_CSV = PROCESSED_DIR / "tfnsw_ev_augmented.csv"
+EV_SA4_CSV = PROCESSED_DIR / "tfnsw_ev_with_sa4.csv"       # chargers (+ enrichment if present) + their SA4
 
 # database (gitignored; rebuilt by the pipeline)
 DUCKDB_PATH = DATA_DIR / "ev_nsw.duckdb"
