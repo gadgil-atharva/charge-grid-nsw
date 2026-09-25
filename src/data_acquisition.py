@@ -89,7 +89,7 @@ COLUMN_ALIASES = {
     "name": "station_name", "address": "station_address", "lat": "latitude", "lon": "longitude",
     "lng": "longitude", "postcode": "postcode", "lga_name": "lga_name", "plugs": "number_of_plugs",
 }
-EXPECTED = ["object_id", "station_name", "station_address", "operator", "number_of_plugs", "charger_type",
+EXPECTED = ["station_name", "station_address", "operator", "number_of_plugs", "charger_type",
             "charger_rating", "latitude", "longitude", "lga_name", "postcode", "source"]
 PLACEHOLDERS = {"", "na", "n/a", "nan", "null", "none", "nil", "-", "--", "?", "tbc", "tbd", "unknown"}
 OPERATOR_RULES = [(r"nrma", "NRMA"), (r"chargefox", "Chargefox"), (r"evie", "Evie Networks"),
@@ -154,7 +154,6 @@ def clean(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     # types
     for c in ("latitude", "longitude"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    df["object_id"] = pd.to_numeric(df["object_id"], errors="coerce").astype("Int64")
     plugs = pd.to_numeric(df["number_of_plugs"], errors="coerce")
     st["invalid_plug_counts_nulled"] = int((plugs.notna() & (plugs <= 0)).sum())
     df["number_of_plugs"] = plugs.where(plugs > 0).astype("Int64")
@@ -179,6 +178,12 @@ def clean(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     st["type_inferred_when_missing"] = unknown_before - int((df["current_type"] == "Unknown").sum())
     df["is_dc_fast"] = (df["current_type"] == "DC") & ~df["is_upcoming"]   # existing DC chargers only
 
+    # rating_kw: fill remaining gaps with a flat default by current type
+    missing_rating_before = int(df["rating_kw"].isna().sum())
+    default_ratings = pd.Series(np.where(df["current_type"] == "DC", 50.0, 22.0), index=df.index)
+    df["rating_kw"] = df["rating_kw"].fillna(default_ratings)
+    st["rating_kw_imputed"] = missing_rating_before - int(df["rating_kw"].isna().sum())
+
     #  names: one spelling per operator / case fixes
     op = df["operator"].fillna("Unknown")
     st["operators_raw"] = int(op.nunique())
@@ -189,7 +194,17 @@ def clean(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     st["operators_clean"] = int(df["operator"].nunique())
     for c in ("station_name", "station_address", "lga_name"):
         df[c] = df[c].map(lambda s: s.title() if isinstance(s, str) and (s.isupper() or s.islower()) else s)
-    df["station_name_key"] = df["station_name"].fillna("").str.lower().str.replace(r"[^a-z0-9]+", "", regex=True)
+
+    # station_name: flag then fill gaps - street from the address, else operator + LGA/postcode
+    df["is_station_name_imputed"] = df["station_name"].isna()
+    st["station_names_imputed"] = int(df["is_station_name_imputed"].sum())
+    street_fallback = df["station_address"].fillna("").str.split(
+        r",|\bNSW\b|\b\d{4}\b", n=1, regex=True).str[0].str.strip()
+    loc_detail = df["lga_name"].fillna(df["postcode"].fillna("Site"))
+    secondary_fallback = df["operator"].fillna("EV") + " Charger (" + loc_detail + ")"
+    fallback_name = street_fallback.where(street_fallback.str.len() > 3, secondary_fallback)
+    df["station_name"] = df["station_name"].fillna(fallback_name)
+    df["station_name_key"] = df["station_name"].str.lower().str.replace(r"[^a-z0-9]+", "", regex=True)
 
     # coordinates: repair obvious slips, then drop what cannot be located in NSW
     sw = df["latitude"].between(140, 155) & df["longitude"].between(-38, -27)          # lat/lon swapped
@@ -213,9 +228,10 @@ def clean(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     df["site_id"] = df.groupby(["operator", df["latitude"].round(4), df["longitude"].round(4)]).ngroup() + 1
     df = df.sort_values("source_row").reset_index(drop=True)
     df.insert(0, "charger_id", np.arange(1, len(df) + 1))
-    cols = ["charger_id", "object_id", "site_id", "station_name", "station_name_key", "station_address",
-            "operator", "number_of_plugs", "charger_type", "current_type", "is_dc_fast", "is_upcoming",
-            "charger_rating", "rating_kw", "latitude", "longitude", "lga_name", "postcode", "source", "source_row"]
+    cols = ["charger_id", "site_id", "station_name", "station_name_key", "is_station_name_imputed",
+            "station_address", "operator", "number_of_plugs", "charger_type", "current_type", "is_dc_fast",
+            "is_upcoming", "charger_rating", "rating_kw", "latitude", "longitude", "lga_name", "postcode",
+            "source", "source_row"]
     st["null_counts"] = df[EXPECTED].isna().sum().to_dict()
     st.update(clean_rows=len(df), dc_fast_rows=int(df["is_dc_fast"].sum()), sites=int(df["site_id"].nunique()))
     return df[cols], st
